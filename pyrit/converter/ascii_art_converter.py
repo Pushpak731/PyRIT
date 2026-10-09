@@ -3,7 +3,7 @@
 
 
 from collections.abc import Sequence
-from functools import cache
+from functools import lru_cache
 
 from art import ASCII_FONTS, text2art
 
@@ -33,7 +33,10 @@ _ART_RANDOM_EXCLUDED_ASCII_FONTS = {
 _ART_RANDOM_FONTS = sorted(set(ASCII_FONTS) - _ART_RANDOM_EXCLUDED_ASCII_FONTS)
 
 
-@cache
+# Bounded so prompts with many distinct unrenderable characters cannot grow the
+# cache without limit. Printable ASCII tops out near 34k entries across the font
+# pool, so ASCII workloads never evict.
+@lru_cache(maxsize=100_000)
 def _font_renders_character(character: str, font: str) -> bool:
     """
     Return whether ``font`` has a glyph for ``character``.
