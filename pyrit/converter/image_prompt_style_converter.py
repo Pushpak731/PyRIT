@@ -134,6 +134,12 @@ class ImagePromptStyleConverter(LLMGenericTextConverter):
         """
         Build the converter identifier with filter and variation parameters.
 
+        The loaded style instructions and variations are what the converter
+        sends to the LLM, so they are part of the identifier: custom filters
+        that share a file name (across folders, or colliding with a built-in
+        filter's name) must not share one identifier when their content
+        differs (#3386).
+
         Returns:
             ComponentIdentifier: The identifier for this converter instance.
         """
@@ -141,6 +147,8 @@ class ImagePromptStyleConverter(LLMGenericTextConverter):
             params={
                 "filter_name": self._filter_name,
                 "variation": self._variation,
+                "style_instructions": self._style_instructions,
+                "variations": self._variations,
             },
             converter_target=self._converter_target.get_identifier(),
         )

@@ -240,3 +240,99 @@ def test_duplicate_variation_prefix_logs_warning(mock_target, caplog) -> None:
 
     assert "Duplicate variation key" in caplog.text
     assert converter._variation_map["bodycam_footage"] == "BODYCAM_FOOTAGE"
+
+
+def _write_filter(path, instructions: str, variation: str = "close_up: tight framing") -> None:
+    name, description = variation.split(": ", 1)
+    path.write_text(
+        f"style_instructions: {instructions}\nvariations:\n  {name}: {description}\n",
+        encoding="utf-8",
+    )
+
+
+def test_identifier_distinguishes_same_named_custom_filters(mock_target, tmp_path) -> None:
+    """Two custom filter files with the same stem but different content render
+    different prompts, so they must not share an identifier (#3386)."""
+    charcoal = tmp_path / "team_a" / "gritty_documentary.yaml"
+    charcoal.parent.mkdir()
+    _write_filter(charcoal, "Render as a charcoal sketch.")
+    neon = tmp_path / "team_b" / "gritty_documentary.yaml"
+    neon.parent.mkdir()
+    _write_filter(neon, "Render as neon cyberpunk.")
+
+    charcoal_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=charcoal)
+    neon_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=neon)
+
+    assert charcoal_converter.get_identifier().hash != neon_converter.get_identifier().hash
+    assert charcoal_converter.get_identifier().unique_name != neon_converter.get_identifier().unique_name
+
+
+def test_identifier_distinguishes_custom_filter_from_same_named_builtin(mock_target, tmp_path) -> None:
+    """A custom file named after a built-in filter must not share the built-in's
+    identifier unless its content is identical (#3386)."""
+    custom = tmp_path / "gritty_documentary.yaml"
+    _write_filter(custom, "Render as a charcoal sketch.")
+
+    custom_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=custom)
+    builtin_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_name="gritty_documentary")
+
+    assert custom_converter.get_identifier().hash != builtin_converter.get_identifier().hash
+
+
+def test_identifier_identical_content_is_stable(mock_target, tmp_path) -> None:
+    """Two files with the same stem and identical content behave identically,
+    so their identifiers match."""
+    first = tmp_path / "a" / "noir.yaml"
+    first.parent.mkdir()
+    _write_filter(first, "Shoot in black and white.")
+    second = tmp_path / "b" / "noir.yaml"
+    second.parent.mkdir()
+    _write_filter(second, "Shoot in black and white.")
+
+    first_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=first)
+    second_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=second)
+
+    assert first_converter.get_identifier().hash == second_converter.get_identifier().hash
+
+
+def test_identifier_exposes_filter_content(mock_target, tmp_path) -> None:
+    custom = tmp_path / "charcoal.yaml"
+    _write_filter(custom, "Render as a charcoal sketch.", variation="close_up: tight framing")
+
+    converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=custom)
+
+    params = converter.get_identifier().params
+    assert params["filter_name"] == "charcoal"
+    assert params["style_instructions"] == "Render as a charcoal sketch."
+    assert params["variations"] == {"close_up": "tight framing"}
+
+
+def test_identifier_distinguishes_variations_of_same_filter(mock_target) -> None:
+    bodycam = ImagePromptStyleConverter(
+        converter_target=mock_target, filter_name="gritty_documentary", variation="bodycam_footage"
+    )
+    other = ImagePromptStyleConverter(converter_target=mock_target, filter_name="gritty_documentary")
+
+    assert bodycam.get_identifier().params["variation"] == "bodycam_footage"
+    assert other.get_identifier().params.get("variation") is None
+    assert bodycam.get_identifier().hash != other.get_identifier().hash
+
+
+def test_registry_accepts_same_named_custom_filters(mock_target, tmp_path, patch_central_database) -> None:
+    """The issue's failure mode: registering converters whose filters share a
+    file name raised a duplicate-name error."""
+    from pyrit.registry import ConverterRegistry
+
+    charcoal = tmp_path / "a" / "noir.yaml"
+    charcoal.parent.mkdir()
+    _write_filter(charcoal, "Shoot in black and white.")
+    neon = tmp_path / "b" / "noir.yaml"
+    neon.parent.mkdir()
+    _write_filter(neon, "Render in neon colors.")
+
+    charcoal_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=charcoal)
+    neon_converter = ImagePromptStyleConverter(converter_target=mock_target, filter_path=neon)
+
+    registry = ConverterRegistry()
+    registry.instances.register(charcoal_converter)
+    registry.instances.register(neon_converter)
