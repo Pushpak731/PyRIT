@@ -128,6 +128,12 @@ class LLMGenericTextConverter(Converter):
             params={
                 "system_prompt_template_hash": system_prompt_hash,
                 "user_prompt_template_hash": user_prompt_hash,
+                # The template parameters change the prompts this converter
+                # renders, so converters sharing templates but passing
+                # different parameters (e.g. language) must not share an
+                # identifier (#3385). Nested under one key so a template
+                # parameter can never collide with the hash params above.
+                "prompt_template_kwargs": self._prompt_kwargs or None,
             },
             converter_target=self._converter_target.get_identifier(),
         )

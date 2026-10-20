@@ -338,3 +338,114 @@ def test_llm_converter_identifier_includes_custom_prompt_template(
     assert custom.get_identifier().hash == same_custom.get_identifier().hash
     for key, value in kwargs.items():
         assert custom_params[key] == value
+
+
+def _kwargs_template() -> SeedPrompt:
+    return SeedPrompt(
+        value="Translate the text into {{ language }}.",
+        data_type="text",
+        parameters=["language"],
+    )
+
+
+def test_generic_llm_converter_identifier_distinguishes_template_kwargs(mock_target) -> None:
+    """Converters sharing a template but passing different template parameters
+    render different prompts, so they must not share an identifier (#3385)."""
+    template = _kwargs_template()
+    french = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template, language="French")
+    spanish = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template, language="Spanish")
+
+    assert french.get_identifier().unique_name != spanish.get_identifier().unique_name
+    assert french.get_identifier().hash != spanish.get_identifier().hash
+
+
+def test_generic_llm_converter_identifier_same_kwargs_is_stable(mock_target) -> None:
+    template = _kwargs_template()
+    french = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template, language="French")
+    french_again = LLMGenericTextConverter(
+        converter_target=mock_target, system_prompt_template=template, language="French"
+    )
+
+    assert french.get_identifier().hash == french_again.get_identifier().hash
+
+
+def test_generic_llm_converter_identifier_exposes_template_kwargs(mock_target) -> None:
+    template = _kwargs_template()
+    converter = LLMGenericTextConverter(
+        converter_target=mock_target, system_prompt_template=template, language="French"
+    )
+
+    assert converter.get_identifier().params["prompt_template_kwargs"] == {"language": "French"}
+
+
+def test_generic_llm_converter_identifier_without_kwargs_is_none(mock_target) -> None:
+    converter = LLMGenericTextConverter(converter_target=mock_target)
+
+    assert converter.get_identifier().params.get("prompt_template_kwargs") is None
+
+
+def test_generic_llm_converter_identifier_distinguishes_user_template_kwargs(mock_target) -> None:
+    """The parameters reach the user prompt template too, so converters built
+    around a user template must also be told apart by them."""
+    template = SeedPrompt(
+        value="Rewrite {{ objective }} in {{ style }}.",
+        data_type="text",
+        parameters=["objective", "style"],
+    )
+    formal = LLMGenericTextConverter(
+        converter_target=mock_target, user_prompt_template_with_objective=template, style="formal"
+    )
+    casual = LLMGenericTextConverter(
+        converter_target=mock_target, user_prompt_template_with_objective=template, style="casual"
+    )
+
+    assert formal.get_identifier().hash != casual.get_identifier().hash
+
+
+def test_generic_llm_converter_identifier_distinguishes_structured_kwargs(mock_target) -> None:
+    """Template parameters can be lists or dicts; nested values still tell
+    converters apart and stay JSON-serializable for storage."""
+    template = SeedPrompt(
+        value="Follow {{ rules }}.",
+        data_type="text",
+        parameters=["rules"],
+    )
+    short = LLMGenericTextConverter(
+        converter_target=mock_target,
+        system_prompt_template=template,
+        rules=["be brief", "be kind"],
+    )
+    long = LLMGenericTextConverter(
+        converter_target=mock_target,
+        system_prompt_template=template,
+        rules=["be brief", "be kind", "be bold"],
+    )
+
+    assert short.get_identifier().hash != long.get_identifier().hash
+    assert short.get_identifier().params["prompt_template_kwargs"] == {"rules": ["be brief", "be kind"]}
+
+
+def test_registry_accepts_converters_differing_only_by_kwargs(mock_target, patch_central_database) -> None:
+    """The issue's failure mode: registering a second converter that differs
+    only by its template parameters raised a duplicate-name error."""
+    from pyrit.registry import ConverterRegistry
+
+    template = _kwargs_template()
+    french = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template, language="French")
+    spanish = LLMGenericTextConverter(converter_target=mock_target, system_prompt_template=template, language="Spanish")
+
+    registry = ConverterRegistry()
+    registry.instances.register(french)
+    registry.instances.register(spanish)
+
+
+def test_subclass_identifier_still_promotes_its_own_parameter(mock_target) -> None:
+    """ToneConverter and friends keep their readable promoted parameter next to
+    the new nested kwargs view."""
+    converter = ToneConverter(converter_target=mock_target, tone="excited")
+    tone_again = ToneConverter(converter_target=mock_target, tone="excited")
+    other_tone = ToneConverter(converter_target=mock_target, tone="serious")
+
+    assert converter.get_identifier().params["tone"] == "excited"
+    assert converter.get_identifier().hash == tone_again.get_identifier().hash
+    assert converter.get_identifier().hash != other_tone.get_identifier().hash
