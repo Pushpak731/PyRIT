@@ -140,6 +140,9 @@ class ImagePromptStyleConverter(LLMGenericTextConverter):
         filter's name) must not share one identifier when their content
         differs (#3386).
 
+        Variation order affects case-insensitive lookup and seeded random selection,
+        so it must survive the identifier's canonical dictionary sorting.
+
         Returns:
             ComponentIdentifier: The identifier for this converter instance.
         """
@@ -149,6 +152,7 @@ class ImagePromptStyleConverter(LLMGenericTextConverter):
                 "variation": self._variation,
                 "style_instructions": self._style_instructions,
                 "variations": self._variations,
+                "variation_order": list(self._variations),
             },
             converter_target=self._converter_target.get_identifier(),
         )

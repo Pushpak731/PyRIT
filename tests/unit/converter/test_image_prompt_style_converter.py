@@ -1,15 +1,20 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from unit.mocks import get_mock_target_identifier
+import yaml
+from unit.mocks import MockPromptTarget, get_mock_target_identifier
 
 from pyrit.common.random_context import configure_random_seed
 from pyrit.converter import ImagePromptStyleConverter
-from pyrit.models import Message, MessagePiece
+from pyrit.memory import SQLiteMemory
+from pyrit.models import ConverterIdentifier, Message, MessagePiece
+from pyrit.prompt_normalizer import ConverterConfiguration, PromptNormalizer
 from pyrit.prompt_target.common.prompt_target import PromptTarget
+from pyrit.registry import ConverterRegistry
 
 
 @pytest.fixture
@@ -305,6 +310,7 @@ def test_identifier_exposes_filter_content(mock_target, tmp_path) -> None:
     assert params["filter_name"] == "charcoal"
     assert params["style_instructions"] == "Render as a charcoal sketch."
     assert params["variations"] == {"close_up": "tight framing"}
+    assert params["variation_order"] == ["close_up"]
 
 
 def test_identifier_distinguishes_variations_of_same_filter(mock_target) -> None:
@@ -336,3 +342,82 @@ def test_registry_accepts_same_named_custom_filters(mock_target, tmp_path, patch
     registry = ConverterRegistry()
     registry.instances.register(charcoal_converter)
     registry.instances.register(neon_converter)
+
+
+@pytest.mark.usefixtures("patch_central_database")
+@pytest.mark.parametrize(
+    ("names", "variation"),
+    [
+        (("close_up", "CLOSE_UP"), "close_up"),
+        (("close_up", " close_up "), "close_up"),
+        (("close_up", "wide_shot"), None),
+    ],
+)
+async def test_identifier_preserves_behavioral_variation_order_async(
+    *,
+    mock_target: MagicMock,
+    tmp_path: Path,
+    sqlite_instance: SQLiteMemory,
+    names: tuple[str, str],
+    variation: str | None,
+) -> None:
+    entries = list(zip(names, ("tight framing", "wide framing"), strict=True))
+    converters = []
+    for index, ordered_entries in enumerate((entries, entries[::-1])):
+        path = tmp_path / str(index) / "noir.yaml"
+        path.parent.mkdir()
+        path.write_text(
+            yaml.safe_dump(
+                {"style_instructions": "Use charcoal.", "variations": dict(ordered_entries)},
+                sort_keys=False,
+            ),
+            encoding="utf-8",
+        )
+        converters.append(
+            ImagePromptStyleConverter(converter_target=mock_target, filter_path=path, variation=variation)
+        )
+
+    normalizer = PromptNormalizer()
+    destination = MockPromptTarget()
+    persisted_identifiers = []
+    try:
+        configure_random_seed(seed=42)
+        for converter in converters:
+            response = await normalizer.send_prompt_async(
+                message=MessagePiece(role="user", original_value="a person walking").to_message(),
+                target=destination,
+                request_converter_configurations=[ConverterConfiguration(converters=[converter])],
+            )
+            requests = await sqlite_instance.get_message_pieces_async(
+                conversation_id=response.get_piece().conversation_id, role="user"
+            )
+            assert len(requests) == 1
+            persisted_identifiers.append(requests[0].converter_identifiers[0])
+    finally:
+        configure_random_seed(seed=None)
+
+    system_prompts = [call.kwargs["system_prompt"] for call in mock_target.set_system_prompt_async.call_args_list]
+    assert len(system_prompts) == 2
+    assert system_prompts[0] != system_prompts[1]
+    assert all("Use charcoal." in prompt for prompt in system_prompts)
+    assert all(("tight framing" in prompt) != ("wide framing" in prompt) for prompt in system_prompts)
+
+    identifiers = [converter.get_identifier() for converter in converters]
+    assert identifiers[0].hash != identifiers[1].hash
+    assert identifiers[0].unique_name != identifiers[1].unique_name
+    assert [identifier.params["variation_order"] for identifier in identifiers] == [list(names), list(names[::-1])]
+    assert persisted_identifiers == identifiers
+    for identifier in identifiers:
+        assert ConverterIdentifier.model_validate_json(identifier.model_dump_json()) == identifier
+
+    registry = ConverterRegistry()
+    for converter in converters:
+        registry.instances.register(converter)
+        assert registry.instances.get(converter.get_identifier().unique_name) is converter
+    stored = await sqlite_instance.get_converter_identifiers_async(
+        identifier_hashes=[identifier.hash for identifier in identifiers]
+    )
+    assert len(stored) == 2
+    assert {identifier.hash: identifier.params for identifier in stored} == {
+        identifier.hash: identifier.params for identifier in identifiers
+    }
